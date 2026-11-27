@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="mr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Relax Zone - Multi-Chair BLE Test</title>
+  <style>
+    * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
+    body { margin: 0; padding: 14px; background: #0b1120; color: #f8fafc; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 14px; margin-bottom: 14px; }
+    .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .badge { padding: 5px 11px; border-radius: 999px; font-size: 12px; font-weight: 700; background: #7f1d1d; color: #fecaca; }
+    .badge.ok { background: #14532d; color: #bbf7d0; }
+    button { border: none; border-radius: 12px; padding: 12px; font-size: 14px; font-weight: 700; color: #fff; background: #2563eb; cursor: pointer; }
+    button:active { transform: scale(0.98); }
+    .btn-add { background: #16a34a; }
+    .btn-stop { background: #b91c1c; }
+    .btn-sec { background: #334155; font-size: 12px; padding: 8px 10px; }
+    .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .chair-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+    .chair-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; border-radius: 10px; background: #0f172a; border: 1px solid #334155; cursor: pointer; }
+    .chair-item.active { border-color: #38bdf8; background: #0c4a6e; }
+    .hex-bar { display: flex; gap: 8px; margin-top: 8px; }
+    input { flex: 1; padding: 12px; border-radius: 10px; border: 1px solid #475569; background: #0f172a; color: #f8fafc; font-family: monospace; font-size: 15px; }
+    pre { background: #020617; border: 1px solid #334155; border-radius: 10px; padding: 10px; height: 220px; overflow-y: auto; font-family: monospace; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; margin: 8px 0 0; }
+    .tx { color: #60a5fa; } .rx { color: #34d399; } .err { color: #f87171; } .info { color: #93c5fd; }
+    small { color: #94a3b8; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="row">
+      <div>
+        <div style="font-size:18px;font-weight:800;">Relax Zone BLE Test</div>
+        <small id="targetInfo">Target: All Connected (0)</small>
+      </div>
+      <span id="statusBadge" class="badge">0 Connected</span>
+    </div>
+    <div class="grid" style="margin-top:12px;">
+      <button class="btn-add" onclick="addChair()">+ Add Chair</button>
+      <button class="btn-stop" onclick="disconnectAll()">Disconnect All</button>
+    </div>
+    <div id="chairList" class="chair-list"></div>
+    <div class="row" style="margin-top:10px;">
+      <small id="wakeStatus">Wake Lock: Off</small>
+      <button class="btn-sec" onclick="toggleWakeLock()">Keep Screen On</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="font-weight:700;margin-bottom:10px;">Chair Controls (0xFFF1)</div>
+    <div class="grid">
+      <button onclick="sendHex('01')">Power / Start (01)</button>
+      <button class="btn-stop" onclick="sendHex('00')">Stop All (00)</button>
+      <button onclick="sendHex('02')">Auto / Relax (02)</button>
+      <button onclick="sendHex('03')">Zero Gravity (03)</button>
+      <button onclick="sendHex('04')">Kneading / Back (04)</button>
+      <button onclick="sendHex('05')">Recline / Leg (05)</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="font-weight:700;">Hex Tester</div>
+    <small>उदा. AA 55 01 किंवा 01 लिहून Send दाबा</small>
+    <div class="hex-bar">
+      <input id="hexInput" type="text" placeholder="AA 55 01" value="01" />
+      <button onclick="sendHex(document.getElementById('hexInput').value)">Send</button>
+    </div>
+    <div class="row" style="margin-top:12px;">
+      <strong style="font-size:14px;">Live TX / RX Log</strong>
+      <div style="display:flex;gap:6px;">
+        <button class="btn-sec" onclick="setFilter('ALL')">All</button>
+        <button class="btn-sec" onclick="setFilter('TX')">TX</button>
+        <button class="btn-sec" onclick="setFilter('RX')">RX</button>
+        <button class="btn-sec" onclick="copyLogs()">Copy</button>
+        <button class="btn-sec" onclick="clearLogs()">Clear</button>
+      </div>
+    </div>
+    <pre id="logBox"></pre>
+  </div>
+
+  <script>
+    const SERVICE_UUID = "0000fff0-0000-1000-8000-00805f9b34fb";
+    const CHAR_UUID = "0000fff1-0000-1000-8000-00805f9b34fb";
+    const chairs = new Map(); // id -> { device, char, name }
+    let selectedTarget = "ALL";
+    let wakeLock = null;
+    let filterMode = "ALL";
+    const logs = [];
+
+    function addLog(type, msg) {
+      const time = new Date().toLocaleTimeString();
+      logs.push({ type, text: `[${time}] ${msg}` });
+      if (logs.length > 300) logs.shift();
+      renderLogs();
+    }
+
+    function setFilter(mode) { filterMode = mode; renderLogs(); }
+
+    function renderLogs() {
+      const box = document.getElementById("logBox");
+      box.innerHTML = "";
+      logs.filter(l => filterMode === "ALL" || l.type === filterMode).forEach(l => {
+        const div = document.createElement("div");
+        div.className = l.type === "TX" ? "tx" : l.type === "RX" ? "rx" : l.type === "ERR" ? "err" : "info";
+        div.textContent = l.text;
+        box.appendChild(div);
+      });
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function clearLogs() { logs.length = 0; renderLogs(); }
+    async function copyLogs() {
+      await navigator.clipboard.writeText(logs.map(l => l.text).join("\n"));
+      addLog("INFO", "लॉग कॉपी केला.");
+    }
+
+    function updateUI() {
+      const badge = document.getElementById("statusBadge");
+      const count = chairs.size;
+      badge.textContent = `${count} Connected`;
+      badge.className = count > 0 ? "badge ok" : "badge";
+
+      if (selectedTarget !== "ALL" && !chairs.has(selectedTarget)) selectedTarget = "ALL";
+      const targetName = selectedTarget === "ALL" ? `All Connected (${count})` : (chairs.get(selectedTarget)?.name || selectedTarget);
+      document.getElementById("targetInfo").textContent = `Target: ${targetName}`;
+
+      const list = document.getElementById("chairList");
+      list.innerHTML = "";
+      if (count > 0) {
+        const allEl = document.createElement("div");
+        allEl.className = `chair-item ${selectedTarget === "ALL" ? "active" : ""}`;
+        allEl.innerHTML = `<span>All Connected Chairs (${count})</span><small>${selectedTarget === "ALL" ? "Active" : "Select"}</small>`;
+        allEl.onclick = () => { selectedTarget = "ALL"; updateUI(); };
+        list.appendChild(allEl);
+
+        chairs.forEach((c, id) => {
+          const el = document.createElement("div");
+          el.className = `chair-item ${selectedTarget === id ? "active" : ""}`;
+          el.innerHTML = `<span>${c.name}</span><button class="btn-sec" onclick="event.stopPropagation();disconnectOne('${id}')">Disconnect</button>`;
+          el.onclick = () => { selectedTarget = id; updateUI(); };
+          list.appendChild(el);
+        });
+      }
+    }
+
+    async function addChair() {
+      if (!navigator.bluetooth) {
+        addLog("ERR", "Web Bluetooth समर्थित नाही. Android Chrome वर HTTPS लिंक वापरा.");
+        return;
+      }
+      try {
+        addLog("INFO", "BLE खुर्ची शोधत आहे...");
+        const device = await navigator.bluetooth.requestDevice({
+          acceptAllDevices: true,
+          optionalServices: [SERVICE_UUID]
+        });
+        const name = device.name || `Chair ${chairs.size + 1}`;
+        device.addEventListener("gattserverdisconnected", () => {
+          chairs.delete(device.id);
+          addLog("ERR", `[${name}] Disconnected.`);
+          updateUI();
+        });
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService(SERVICE_UUID);
+        const targetChar = await service.getCharacteristic(CHAR_UUID);
+        if (targetChar.properties.notify || targetChar.properties.indicate) {
+          await targetChar.startNotifications();
+          targetChar.addEventListener("characteristicvaluechanged", (e) => {
+            const bytes = Array.from(new Uint8Array(e.target.value.buffer));
+            const hex = bytes.map(b => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+            addLog("RX", `[${name}] RX <- HEX: [${hex}] | DEC: [${bytes.join(", ")}]`);
+          });
+        }
+        chairs.set(device.id, { device, char: targetChar, name });
+        addLog("INFO", `[${name}] Connected!`);
+        updateUI();
+      } catch (err) {
+        addLog("ERR", "Connect Error: " + err.message);
+      }
+    }
+
+    function disconnectOne(id) {
+      const c = chairs.get(id);
+      if (c?.device.gatt.connected) c.device.gatt.disconnect();
+      chairs.delete(id);
+      updateUI();
+    }
+
+    function disconnectAll() {
+      chairs.forEach(c => { if (c.device.gatt.connected) c.device.gatt.disconnect(); });
+      chairs.clear();
+      updateUI();
+    }
+
+    function parseHex(str) {
+      const cleaned = str.replace(/0x/gi, "").replace(/[^0-9a-fA-F]/g, " ").trim();
+      if (!cleaned) return null;
+      const parts = cleaned.split(/\s+/);
+      const bytes = [];
+      for (const p of parts) {
+        if (!p || p.length > 2) return null;
+        const val = parseInt(p, 16);
+        if (Number.isNaN(val)) return null;
+        bytes.push(val);
+      }
+      return new Uint8Array(bytes);
+    }
+
+    async function sendHex(hexStr) {
+      if (chairs.size === 0) { addLog("ERR", "आधी + Add Chair ने खुर्ची जोडा."); return; }
+      const data = parseHex(hexStr);
+      if (!data) { addLog("ERR", "अवैध Hex: " + hexStr); return; }
+      const targets = selectedTarget === "ALL" ? Array.from(chairs.values()) : [chairs.get(selectedTarget)].filter(Boolean);
+      const hexOut = Array.from(data).map(b => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+      for (const t of targets) {
+        try {
+          if (t.char.properties.writeWithoutResponse) await t.char.writeValueWithoutResponse(data);
+          else await t.char.writeValue(data);
+          addLog("TX", `[${t.name}] TX -> HEX: [${hexOut}] | DEC: [${Array.from(data).join(", ")}]`);
+        } catch (err) {
+          addLog("ERR", `[${t.name}] Write Error: ${err.message}`);
+        }
+      }
+    }
+
+    async function toggleWakeLock() {
+      if (!("wakeLock" in navigator)) { addLog("ERR", "Wake Lock उपलब्ध नाही."); return; }
+      if (!wakeLock) {
+        wakeLock = await navigator.wakeLock.request("screen");
+        document.getElementById("wakeStatus").textContent = "Wake Lock: Active";
+      } else {
+        await wakeLock.release(); wakeLock = null;
+        document.getElementById("wakeStatus").textContent = "Wake Lock: Off";
+      }
+    }
+
+    addLog("INFO", "Ready. HTTPS लिंकवरून उघडून '+ Add Chair' दाबा.");
+  </script>
+</body>
+</html>
